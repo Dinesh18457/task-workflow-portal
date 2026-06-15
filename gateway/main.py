@@ -9,11 +9,15 @@ from fastapi.responses import JSONResponse
 
 load_dotenv()
 
-BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8081").rstrip("/")
+# --- Microservice URLs Configuration ---
+# 1. Spring Boot handles Authentication & Roles (PostgreSQL)
+SPRING_BOOT_URL = os.getenv("SPRING_BOOT_URL", "http://localhost:8081").rstrip("/")
+# 2. Node.js handles Tasks Workflows & CRUD (MongoDB)
+NODE_JS_URL = os.getenv("NODE_JS_URL", "http://localhost:5000").rstrip("/")
 
 app = FastAPI(
-    title="Task Workflow API Gateway",
-    version="1.0.0",
+    title="Intelligent Polyglot API Gateway",
+    version="2.0.0",
 )
 
 # Fix CORS rules to allow both Vite (5173) and Create React App (3000)
@@ -31,21 +35,44 @@ app.add_middleware(
 
 @app.get("/health")
 async def health():
-    return {"status": "gateway up"}
+    return {
+        "status": "gateway up",
+        "routing_targets": {
+            "auth_service": SPRING_BOOT_URL,
+            "task_service": NODE_JS_URL
+        }
+    }
 
 
 @app.api_route("/api/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
 async def proxy_api(path: str, request: Request):
-    # Route mapping to direct requests smoothly down to port 8081
-    if path.startswith("api/"):
-        target_url = f"{BACKEND_URL}/{path}"
+    
+    # -------------------------------------------------------------
+    # CRITICAL WORKFLOW ROUTING INTELLIGENCE
+    # -------------------------------------------------------------
+    # If the path concerns auth (login, signup, user accounts), direct it to Spring Boot.
+    # If the path concerns tasks, divert it entirely to the Node.js / MongoDB service.
+    # -------------------------------------------------------------
+    if "auth" in path or "user" in path or "members" in path:
+        target_backend = SPRING_BOOT_URL
+        # Ensure the sub-path formatting matches Spring Boot expectations
+        formatted_path = path if path.startswith("api/") else f"api/{path}"
+        target_url = f"{target_backend}/{formatted_path}"
     else:
-        target_url = f"{BACKEND_URL}/api/{path}"
+        target_backend = NODE_JS_URL
+        # Maps directly to Node.js /api/node/tasks structure
+        target_url = f"{target_backend}/api/node/tasks"
+        
+        # If the frontend passes a specific document ID target (e.g., /api/tasks/5)
+        path_segments = path.strip("/").split("/")
+        if len(path_segments) > 1 and path_segments[-1].isdigit():
+            target_url = f"{target_url}/{path_segments[-1]}"
 
+    # Attach query parameters if they exist
     if request.url.query:
         target_url = f"{target_url}?{request.url.query}"
 
-    # CRITICAL FIX: Exclude Content-Length and Host headers to avoid h11 protocol errors
+    # Exclude protocol headers to avoid h11 issues
     excluded_forward_headers = ["host", "content-length", "connection"]
     headers = {
         k: v for k, v in request.headers.items() 
@@ -66,7 +93,7 @@ async def proxy_api(path: str, request: Request):
     except httpx.ConnectError:
         return JSONResponse(
             status_code=503,
-            content={"error": "Backend service unavailable", "backend": BACKEND_URL},
+            content={"error": f"Target microservice down", "target": target_url},
         )
     except httpx.HTTPError as exc:
         return JSONResponse(status_code=502, content={"error": str(exc)})
